@@ -1,0 +1,20 @@
+{
+  "enabled": true,
+  "smtp_host": "",
+  "smtp_port": 465,
+  "security": "ssl",
+  "sender_email": "",
+  "password": "",
+  "recipients": [
+    ""
+  ],
+  "cc": [],
+  "schedule_times": [
+    "09:00",
+    "21:59"
+  ],
+  "hourly_enabled": false,
+  "hourly_interval_hours": 1,
+  "hourly_minute": 0,
+  "timeout_seconds": 30
+}
