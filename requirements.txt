@@ -1,0 +1,4 @@
+Flask>=3.0,<4
+ping3>=4.0,<5
+reportlab>=4.0,<5
+Pillow>=10.0,<13
