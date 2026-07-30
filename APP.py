@@ -39,24 +39,25 @@ HTML = """
     <title>Live IP Monitor</title>
     <meta http-equiv="refresh" content="1">
     <style>
-        body { font-family: Arial; background: #e9ecef; }
+        body { font-family: Arial; background: #e9ecef; margin: 0; }
 
         table {
-            width: 95%;
-            margin: 30px auto;
+            width: 98%;
+            margin: 15px auto;
             border-collapse: collapse;
             background: white;
             box-shadow: 0 0 10px #aaa;
+            font-size: 12px;
         }
 
         th {
             background: #343a40;
             color: white;
-            padding: 12px;
+            padding: 8px 5px;
         }
 
         td {
-            padding: 10px;
+            padding: 6px 5px;
             border-bottom: 1px solid #ddd;
             text-align: center;
         }
@@ -84,11 +85,11 @@ HTML = """
             border-radius: 2px; 
         }
 
-        .graph-info {
-            margin-top: 7px;
-            color: #6c757d;
-            font-size: 12px;
-            line-height: 1.5;
+        .uptime-cell {
+            color: #495057;
+            font-size: 11px;
+            line-height: 1.45;
+            white-space: nowrap;
         }
 
         .good { background: #28a745; }
@@ -96,9 +97,16 @@ HTML = """
         .bad { background: #dc3545; }
         .drop { background: #8b0000; height: 4px !important; }
 
+        .title-bar {
+            width: 98%;
+            margin: 10px auto;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
         h2 {
-            text-align: center;
-            margin-top: 30px;
+            margin: 0;
         }
 
         .toolbar { width: 95%; margin: 0 auto 15px; text-align: right; }
@@ -111,9 +119,8 @@ HTML = """
 </head>
 <body>
 
-<h2>Live IP Monitoring Dashboard</h2>
-
-<div class="toolbar">
+<div class="title-bar">
+    <h2>Live IP Monitoring Dashboard</h2>
     <a class="pdf-button" href="/report.pdf">Export PDF Report</a>
 </div>
 
@@ -124,9 +131,11 @@ HTML = """
         <th>Name</th>
         <th>Status</th>
         <th>Latency Graph</th>
+        <th>UP Date and Time</th>
+        <th>Drop Packets</th>
     </tr>
 
-    {% for category, ip, name, st, history, started, success_count, drop_count in data %}
+    {% for category, ip, name, st, history, started, drop_count in data %}
     <tr>
         <td><b>{{ category }}</b></td>
         <td>{{ ip }}</td>
@@ -146,12 +155,12 @@ HTML = """
                     {% endif %}
                 {% endfor %}
             </div>
-            <div class="graph-info">
-                Ping started: {{ started }}<br>
-                <span style="color:#198754">Ping Success (last 12h): {{ success_count }}</span>
-                &nbsp;|&nbsp;
-                <span style="color:#dc3545">Ping Drop (last 12h): {{ drop_count }}</span>
-            </div>
+        </td>
+        <td class="uptime-cell">
+            {{ started }}
+        </td>
+        <td class="uptime-cell" style="color:#dc3545; font-weight:bold;">
+            {{ drop_count }}
         </td>
     </tr>
     {% endfor %}
@@ -234,8 +243,7 @@ def index():
 
         started = ping_started_at[ip]
         history = list(latency_history[ip])
-        success_count = sum(1 for _, is_success in ping_count_history[ip] if is_success)
-        drop_count = len(ping_count_history[ip]) - success_count
+        drop_count = sum(1 for _, is_success in ping_count_history[ip] if not is_success)
         result.append((
             category,
             ip,
@@ -243,7 +251,6 @@ def index():
             status,
             history,
             started.strftime("%d-%m-%Y %I:%M:%S %p"),
-            success_count,
             drop_count,
         ))
 
