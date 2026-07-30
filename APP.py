@@ -132,7 +132,6 @@ HTML = """
         <th>Status</th>
         <th>Latency Graph</th>
         <th>UP Date and Time</th>
-        <th>Drop Packets</th>
     </tr>
 
     {% for category, ip, name, st, history, started, drop_count in data %}
@@ -157,10 +156,8 @@ HTML = """
             </div>
         </td>
         <td class="uptime-cell">
-            {{ started }}
-        </td>
-        <td class="uptime-cell" style="color:#dc3545; font-weight:bold;">
-            {{ drop_count }}
+            {{ started }}<br>
+            <span style="color:#dc3545; font-weight:bold;">{{ drop_count }}</span>
         </td>
     </tr>
     {% endfor %}
