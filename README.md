@@ -1,3 +1,5 @@
+# Kill Old all task 
+taskkill /F /IM python.exe
 # Network Monitor
 
 A Windows network monitoring dashboard for IP addresses and hostnames. It continuously checks reachability, displays latency history, exports PDF reports, and can send scheduled email snapshots.
