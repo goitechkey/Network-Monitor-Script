@@ -1,8 +1,9 @@
-from flask import Flask, render_template_string, send_file
+from flask import Flask, render_template_string, send_file, request
 from ping3 import ping
 from collections import deque
 import logging
 import json
+import csv
 import smtplib
 import socket
 import ssl
@@ -24,6 +25,7 @@ app = Flask(__name__)
 BASE_DIR = Path(__file__).resolve().parent
 SETTINGS_FILE = BASE_DIR / "email_settings.json"
 LOG_FILE = BASE_DIR / "email_report.log"
+HISTORY_DIR = BASE_DIR / "ping_history"
 
 latency_history = {}
 ping_started_at = {}
@@ -31,6 +33,8 @@ ping_count_history = {}
 COUNT_WINDOW_HOURS = 12
 
 MAX_POINTS = 120  # Long graph history
+history_lock = threading.Lock()
+active_monitor_date = None
 
 HTML = """
 <!DOCTYPE html>
@@ -115,6 +119,11 @@ HTML = """
             background: #dc3545; color: white; text-decoration: none;
             font-weight: bold;
         }
+        .history-button {
+            display: inline-block; padding: 7px 10px; border-radius: 5px;
+            background: #0d6efd; color: white; text-decoration: none;
+            font-weight: bold; white-space: nowrap;
+        }
     </style>
 </head>
 <body>
@@ -131,6 +140,7 @@ HTML = """
         <th>Name</th>
         <th>Status</th>
         <th>Latency Graph</th>
+        <th>Ping History</th>
         <th>UP Date and Time</th>
     </tr>
 
@@ -155,6 +165,7 @@ HTML = """
                 {% endfor %}
             </div>
         </td>
+        <td><a class="history-button" href="/ping-history?ip={{ ip }}" target="_blank">View Report</a></td>
         <td class="uptime-cell">
             {{ started }}<br>
             <span style="color:#dc3545; font-weight:bold;">{{ drop_count }}</span>
@@ -168,9 +179,51 @@ HTML = """
 </html>
 """
 
+HISTORY_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Ping History</title>
+    <style>
+        body { font-family: Arial; background: #e9ecef; margin: 0; color: #212529; }
+        .page { width: 96%; margin: 20px auto; }
+        .heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+        h2 { margin: 0; }
+        .note { color: #6c757d; margin: 8px 0 16px; }
+        .back { background:#343a40; color:white; text-decoration:none; padding:9px 13px; border-radius:5px; font-weight:bold; }
+        table { width:100%; border-collapse:collapse; background:white; box-shadow:0 0 10px #aaa; font-size:13px; }
+        th { background:#343a40; color:white; padding:9px 6px; }
+        td { padding:8px 6px; border-bottom:1px solid #ddd; text-align:center; }
+        .up { color:#198754; font-weight:bold; } .down { color:#dc3545; font-weight:bold; }
+        .empty { background:white; padding:25px; text-align:center; box-shadow:0 0 10px #aaa; }
+    </style>
+</head>
+<body>
+<div class="page">
+    <div class="heading"><h2>Ping History Report</h2><a class="back" href="/">Back to Monitor</a></div>
+    <p class="note">{{ title }} &middot; {{ report_date }}. Only today's report is shown here; older daily files remain safely saved on the server.</p>
+    {% if records %}
+    <table>
+        <tr><th>Date & Time</th><th>Category</th><th>IP Address</th><th>Name</th><th>Status</th><th>Latency</th></tr>
+        {% for record in records %}
+        <tr>
+            <td>{{ record.timestamp }}</td><td>{{ record.category }}</td><td>{{ record.ip }}</td><td>{{ record.name }}</td>
+            <td class="{{ 'up' if record.status == 'UP' else 'down' }}">{{ record.status }}</td>
+            <td>{{ record.latency_ms ~ ' ms' if record.latency_ms is not none else '-' }}</td>
+        </tr>
+        {% endfor %}
+    </table>
+    {% else %}<div class="empty">No ping data has been recorded for this device today yet.</div>{% endif %}
+</div>
+</body>
+</html>
+"""
+
 def read_ips():
     entries = []
-    with open("ips.txt", encoding="utf-8") as f:
+    # Resolve this next to APP.py so the service works regardless of the
+    # working folder used by Task Scheduler or a shortcut.
+    with (BASE_DIR / "ips.txt").open(encoding="utf-8") as f:
         for line_number, line in enumerate(f, start=1):
             line = line.strip()
             if not line or line.startswith("#"):
@@ -193,68 +246,138 @@ def format_elapsed(start_time, current_time):
     minutes, seconds = divmod(remainder, 60)
     return f"{hours:02d}h {minutes:02d}m {seconds:02d}s"
 
-@app.route("/")
-def index():
-    result = []
 
-    for category, ip, name in read_ips():
+def history_file_for(report_date):
+    """Return the permanent backend file for one calendar day."""
+    return HISTORY_DIR / f"ping-history-{report_date:%Y-%m-%d}.txt"
 
-        if ip not in latency_history:
-            latency_history[ip] = deque(maxlen=MAX_POINTS)
-            ping_started_at[ip] = datetime.now()
-            ping_count_history[ip] = deque()
 
-        res = ping(ip, timeout=1)
-        now = datetime.now()
+def reset_monitor_for_new_day(report_date):
+    """Keep the live dashboard (and its visible history) limited to today."""
+    global active_monitor_date
+    if active_monitor_date == report_date:
+        return
 
-        if res is not None:
-            latency_ms = int(res * 1000)
+    latency_history.clear()
+    ping_started_at.clear()
+    ping_count_history.clear()
+    active_monitor_date = report_date
+    logging.info("Started a new live monitor day: %s", report_date.isoformat())
 
-            if latency_ms <= 30:
-                bar_type = "good"
-                height = 22
-            elif latency_ms <= 80:
-                bar_type = "medium"
-                height = 14
-            else:
-                bar_type = "bad"
-                height = 8
 
-            latency_history[ip].append({
-                "type": bar_type,
-                "height": height
-            })
-
-            status = "UP"
-        else:
-            latency_history[ip].append({
-                "type": "drop",
-                "height": 4
-            })
-            status = "DOWN"
-
-        ping_count_history[ip].append((now, status == "UP"))
-        cutoff = now - timedelta(hours=COUNT_WINDOW_HOURS)
-        while ping_count_history[ip] and ping_count_history[ip][0][0] < cutoff:
-            ping_count_history[ip].popleft()
-
-        started = ping_started_at[ip]
-        history = list(latency_history[ip])
-        drop_count = sum(1 for _, is_success in ping_count_history[ip] if not is_success)
-        result.append((
+def save_ping_record(category, ip, name, status, latency_ms, recorded_at):
+    """Append one result to today's file without touching earlier daily files."""
+    HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+    history_file = history_file_for(recorded_at.date())
+    is_new_file = not history_file.exists()
+    with history_file.open("a", encoding="utf-8", newline="") as saved_history:
+        writer = csv.writer(saved_history, delimiter="\t", lineterminator="\n")
+        if is_new_file:
+            writer.writerow(["Date & Time", "Category", "IP Address", "Name", "Status", "Latency (ms)"])
+        writer.writerow([
+            recorded_at.strftime("%d-%m-%Y %I:%M:%S %p"),
             category,
             ip,
             name,
             status,
-            history,
-            started.strftime("%d-%m-%Y %I:%M:%S %p"),
-            drop_count,
-        ))
+            "" if latency_ms is None else latency_ms,
+        ])
+
+
+def load_today_history(ip):
+    """Load only today's records; previous-day files stay archived on disk."""
+    history_file = history_file_for(datetime.now().date())
+    if not history_file.exists():
+        return []
+
+    records = []
+    with history_file.open(encoding="utf-8", newline="") as saved_history:
+        reader = csv.DictReader(saved_history, delimiter="\t")
+        for row in reader:
+            if row.get("IP Address") != ip:
+                continue
+            latency = row.get("Latency (ms)", "")
+            records.append({
+                "timestamp": row.get("Date & Time", ""),
+                "category": row.get("Category", ""),
+                "ip": row.get("IP Address", ""),
+                "name": row.get("Name", ""),
+                "status": row.get("Status", ""),
+                "latency_ms": int(latency) if latency.isdigit() else None,
+            })
+    return list(reversed(records))
+
+@app.route("/")
+def index():
+    result = []
+
+    # A browser refresh is a monitoring cycle.  Keep state changes together so
+    # simultaneous dashboard users cannot interleave a daily rollover.
+    with history_lock:
+        reset_monitor_for_new_day(datetime.now().date())
+        for category, ip, name in read_ips():
+            if ip not in latency_history:
+                latency_history[ip] = deque(maxlen=MAX_POINTS)
+                ping_started_at[ip] = datetime.now()
+                ping_count_history[ip] = deque()
+
+            res = ping(ip, timeout=1)
+            now = datetime.now()
+
+            if res is not None:
+                latency_ms = int(res * 1000)
+                if latency_ms <= 30:
+                    bar_type, height = "good", 22
+                elif latency_ms <= 80:
+                    bar_type, height = "medium", 14
+                else:
+                    bar_type, height = "bad", 8
+                latency_history[ip].append({"type": bar_type, "height": height})
+                status = "UP"
+            else:
+                latency_ms = None
+                latency_history[ip].append({"type": "drop", "height": 4})
+                status = "DOWN"
+
+            save_ping_record(category, ip, name, status, latency_ms, now)
+            ping_count_history[ip].append((now, status == "UP"))
+            cutoff = now - timedelta(hours=COUNT_WINDOW_HOURS)
+            while ping_count_history[ip] and ping_count_history[ip][0][0] < cutoff:
+                ping_count_history[ip].popleft()
+
+            started = ping_started_at[ip]
+            history = list(latency_history[ip])
+            drop_count = sum(1 for _, is_success in ping_count_history[ip] if not is_success)
+            result.append((
+                category,
+                ip,
+                name,
+                status,
+                history,
+                started.strftime("%d-%m-%Y %I:%M:%S %p"),
+                drop_count,
+            ))
 
     return render_template_string(
         HTML,
         data=result,
         max_points=MAX_POINTS,
+    )
+
+
+@app.route("/ping-history")
+def ping_history():
+    ip = request.args.get("ip", "").strip()
+    selected = next((entry for entry in read_ips() if entry[1] == ip), None)
+    if selected is None:
+        return "Unknown IP address", 404
+
+    category, _, name = selected
+    return render_template_string(
+        HISTORY_HTML,
+        title=f"{name} ({category}) - {ip}",
+        report_date=datetime.now().strftime("%d %B %Y"),
+        records=load_today_history(ip),
     )
 
 def generate_pdf_report():
